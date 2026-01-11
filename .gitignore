@@ -1,0 +1,80 @@
+# ======================
+# DATA FILES (JANGAN DI-PUSH)
+# ======================
+datasets/
+data/*.pkl
+data/*.csv
+data/*.json
+*.csv
+
+# ======================
+# PYTHON
+# ======================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ======================
+# JUPYTER NOTEBOOK
+# ======================
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+*.ipynb_checkpoints/
+.ipynb_checkpoints/*
+
+# ======================
+# PYTORCH & ML
+# ======================
+experiments/trained_models/
+*.pth
+*.pt
+*.ckpt
+runs/  # TensorBoard logs
+*.log
+
+# ======================
+# ENVIRONMENT
+# ======================
+venv/
+env/
+ENV/
+.venv
+*.env
+
+# ======================
+# IDE
+# ======================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ======================
+# OTHER
+# ======================
+*.zip
+*.tar.gz
+*.rar
+pytest_cache/
+.coverage
+htmlcov/
+.tox/
