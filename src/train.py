@@ -288,7 +288,6 @@ def train_model(
         factor=lr_scheduler_factor,
         patience=lr_scheduler_patience,
         min_lr=1e-6,
-        verbose=True,
     )
 
     # TensorBoard writer
