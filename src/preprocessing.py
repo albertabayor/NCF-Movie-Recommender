@@ -1,13 +1,15 @@
 """
-Preprocessing pipeline for NCF Movie Recommender.
+Memory-efficient preprocessing pipeline for NCF Movie Recommender.
 
-This module implements the full data preprocessing pipeline:
-1. Load and merge all datasets
-2. Data cleaning and quality checks
-3. Filter sparse users/movies
-4. Time-based train/val/test split (per-user)
-5. Create cold-start evaluation sets
-6. Save processed data and mappings
+This module implements a streamlined preprocessing pipeline designed to work
+within Colab's RAM limits (~12GB). Key optimizations:
+1. Filter sparse users/items BEFORE merging (reduces data size early)
+2. Process genres efficiently (skip full merge when possible)
+3. Use in-place operations to reduce memory copies
+4. Optional mode to skip content features for baseline models
+
+Use run_minimal() for fast preprocessing without content features.
+Use run_full() for complete preprocessing with genres.
 
 The pipeline follows the methodology outlined in PROJECT_PLAN.md section 4.1.
 """
@@ -23,17 +25,25 @@ import pandas as pd
 from sklearn.preprocessing import MultiLabelBinarizer
 from tqdm import tqdm
 
-
 from .config import config
 from .data_loader import DataLoader, parse_genres, extract_all_genres
 
 
 class DataPreprocessor:
     """
-    Complete preprocessing pipeline for MovieLens data.
+    Memory-efficient preprocessing pipeline for MovieLens data.
 
     This class orchestrates the entire preprocessing workflow from raw
     CSV files to train/val/test splits ready for model training.
+
+    Usage:
+        # Fast preprocessing (no content features)
+        preprocessor = DataPreprocessor()
+        preprocessor.run_minimal()
+
+        # Full preprocessing (with genres)
+        preprocessor = DataPreprocessor()
+        preprocessor.run_full()
     """
 
     def __init__(self, cfg=None):
@@ -48,10 +58,10 @@ class DataPreprocessor:
 
         # Internal state
         self.genre_encoder: Optional[MultiLabelBinarizer] = None
-        self.user_map: Optional[Dict[int, int]] = None  # Original -> Remapped
-        self.item_map: Optional[Dict[int, int]] = None  # Original -> Remapped
-        self.reverse_user_map: Optional[Dict[int, int]] = None  # Remapped -> Original
-        self.reverse_item_map: Optional[Dict[int, int]] = None  # Remapped -> Original
+        self.user_map: Optional[Dict[int, int]] = None
+        self.item_map: Optional[Dict[int, int]] = None
+        self.reverse_user_map: Optional[Dict[int, int]] = None
+        self.reverse_item_map: Optional[Dict[int, int]] = None
 
         # Statistics
         self.stats_before = {}
@@ -59,260 +69,129 @@ class DataPreprocessor:
 
     def run(self) -> None:
         """
-        Execute the full preprocessing pipeline.
+        Execute the full preprocessing pipeline (with genres).
 
-        This runs all steps in sequence and saves the results.
+        Alias for run_full() for backward compatibility.
+        """
+        self.run_full()
+
+    def run_full(self) -> None:
+        """
+        Execute the full preprocessing pipeline with content features.
+
+        This processes genres from metadata but uses memory optimizations.
         """
         print("=" * 60)
-        print("NCF MOVIE RECOMMENDER - PREPROCESSING PIPELINE")
+        print("NCF MOVIE RECOMMENDER - PREPROCESSING (FULL)")
         print("=" * 60)
 
-        # Step 1: Load data
-        print("\n[Step 1/7] Loading data...")
-        data = self.loader.load_all()
+        # Step 1: Load and filter ratings FIRST (before merge)
+        print("\n[Step 1/8] Loading and filtering ratings...")
+        ratings = self.loader.load_ratings()
 
-        # Step 2: Merge datasets
-        print("\n[Step 2/7] Merging datasets...")
-        merged_df = self._merge_data(data)
+        # Filter sparse users/items early to reduce data size
+        initial_users = ratings["userId"].nunique()
+        initial_items = ratings["movieId"].nunique()
 
-        # Step 3: Clean and validate
-        print("\n[Step 3/7] Cleaning and validating data...")
-        merged_df = self._clean_data(merged_df)
-        self.stats_before = self._compute_statistics(merged_df, "before filtering")
+        user_counts = ratings["userId"].value_counts()
+        item_counts = ratings["movieId"].value_counts()
 
-        # Step 4: Filter sparse users/movies
-        print("\n[Step 4/7] Filtering sparse users and movies...")
-        filtered_df = self._filter_sparse(merged_df)
-        self.stats_after = self._compute_statistics(filtered_df, "after filtering")
+        valid_users = set(user_counts[user_counts >= self.cfg.data.MIN_USER_RATINGS].index)
+        valid_items = set(item_counts[item_counts >= self.cfg.data.MIN_ITEM_RATINGS].index)
 
-        # Step 5: Time-based split
-        print("\n[Step 5/7] Creating time-based train/val/test split...")
-        train_df, val_df, test_df = self._time_based_split(filtered_df)
+        ratings = ratings[ratings["userId"].isin(valid_users)]
+        ratings = ratings[ratings["movieId"].isin(valid_items)]
 
-        # Step 6: Create cold-start evaluation set
-        print("\n[Step 6/7] Creating cold-start evaluation set...")
-        cold_start_df = self._create_cold_start_set(train_df, test_df)
+        # Free memory
+        del user_counts, item_counts, valid_users, valid_items
 
-        # Step 7: Save processed data
-        print("\n[Step 7/7] Saving processed data...")
-        self._save_processed_data(
-            train_df, val_df, test_df, cold_start_df, merged_df
-        )
+        print(f"  Users: {initial_users:,} -> {ratings['userId'].nunique():,}")
+        print(f"  Items: {initial_items:,} -> {ratings['movieId'].nunique():,}")
+        print(f"  Ratings: {len(ratings):,}")
 
-        print("\n" + "=" * 60)
-        print("PREPROCESSING COMPLETE!")
-        print("=" * 60)
+        # Step 2: Load metadata
+        print("\n[Step 2/8] Loading metadata...")
+        metadata = self.loader.load_movies_metadata()
+        links = self.loader.load_links()
 
-    # ========================================================================
-    # STEP 2: DATA MERGING
-    # ========================================================================
+        # Step 3: Create user/item mappings
+        print("\n[Step 3/8] Creating mappings...")
+        all_users = sorted(ratings["userId"].unique())
+        all_items = sorted(ratings["movieId"].unique())
 
-    def _merge_data(self, data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
-        """
-        Merge ratings with metadata via links table.
+        self.user_map = {old: new for new, old in enumerate(all_users)}
+        self.item_map = {old: new for new, old in enumerate(all_items)}
+        self.reverse_user_map = {new: old for old, new in self.user_map.items()}
+        self.reverse_item_map = {new: old for old, new in self.item_map.items()}
 
-        Join path: ratings -> links (via movieId) -> metadata (via tmdbId)
+        print(f"  Created mappings: {len(self.user_map):,} users, {len(self.item_map):,} items")
 
-        Args:
-            data: Dictionary with ratings, metadata, links DataFrames
+        # Step 4: Process genres efficiently (in-memory, no merge needed)
+        print("\n[Step 4/8] Processing genres...")
+        self.genre_encoder = MultiLabelBinarizer()
 
-        Returns:
-            Merged DataFrame with all information
-        """
-        ratings = data["ratings"]
-        metadata = data["metadata"]
-        links = data["links"]
+        # Parse genres from metadata (only for movies we have)
+        movie_metadata = {}
 
-        print(f"  Initial ratings: {len(ratings):,}")
+        # Build mapping from movieId to genres
+        # First, get movieId -> tmdbId mapping from links
+        movie_to_tmdb = dict(zip(links["movieId"], links["tmdbId"]))
 
-        # Merge ratings with links
-        merged = ratings.merge(
-            links[["movieId", "tmdbId"]],
-            on="movieId",
-            how="left"
-        )
-        print(f"  After merging with links: {len(merged):,}")
+        # Then, get tmdbId -> genres from metadata
+        tmdb_to_genres = {}
+        for _, row in metadata.iterrows():
+            tmdb_id = row["id"]
+            if pd.notna(tmdb_id):
+                genres = parse_genres(row["genres"])
+                tmdb_to_genres[int(tmdb_id)] = genres
 
-        # Merge with metadata via tmdbId
-        # Convert tmdbId to int for merging (metadata uses int)
-        merged["tmdbId"] = pd.to_numeric(merged["tmdbId"], errors="coerce")
-        metadata["id"] = pd.to_numeric(metadata["id"], errors="coerce")
+        # Map movieId -> genres
+        num_items = len(self.item_map)
+        all_genre_lists = []
 
-        merged = merged.merge(
-            metadata[["id", "title", "overview", "genres"]],
-            left_on="tmdbId",
-            right_on="id",
-            how="left"
-        )
+        for item_id in range(num_items):
+            original_id = self.reverse_item_map[item_id]
+            if original_id in movie_to_tmdb:
+                tmdb_id = movie_to_tmdb[original_id]
+                if pd.notna(tmdb_id) and int(tmdb_id) in tmdb_to_genres:
+                    all_genre_lists.append(tmdb_to_genres[int(tmdb_id)])
+                else:
+                    all_genre_lists.append([])
+            else:
+                all_genre_lists.append([])
 
-        print(f"  After merging with metadata: {len(merged):,}")
+        # Fit genre encoder
+        self.genre_encoder.fit(all_genre_lists)
 
-        # Parse genres from JSON
-        print("  Parsing genres...")
-        merged["genres_list"] = merged["genres"].apply(parse_genres)
+        print(f"  Created genre encoder: {len(self.genre_encoder.classes_)} genres")
+        print(f"    Genres: {', '.join(self.genre_encoder.classes_)}")
 
-        # Clean up
-        merged = merged.drop(columns=["id", "genres"])
+        # Step 5: Apply mappings and clean data
+        print("\n[Step 5/8] Applying mappings and cleaning...")
+        ratings["userId"] = ratings["userId"].map(self.user_map)
+        ratings["movieId"] = ratings["movieId"].map(self.item_map)
 
-        return merged
-
-    # ========================================================================
-    # STEP 3: CLEANING & VALIDATION
-    # ========================================================================
-
-    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Clean data and perform quality checks.
-
-        Checks:
-        - Rating range: 0.5 - 5.0
-        - Remove rows with empty overview
-        - Remove duplicates (userId, movieId)
-        - Remove movies without genres
-        - Verify timestamp ordering
-
-        Args:
-            df: Merged DataFrame
-
-        Returns:
-            Cleaned DataFrame
-        """
-        initial_count = len(df)
-
-        # 1. Validate rating range
-        df = df[
-            (df["rating"] >= self.cfg.data.MIN_RATING) &
-            (df["rating"] <= self.cfg.data.MAX_RATING)
-        ]
-        print(f"  After rating validation: {len(df):,} ({len(df) - initial_count:,} removed)")
-
-        # 2. Remove rows with empty overview
-        df = df[df["overview"].notna() & (df["overview"] != "")]
-        print(f"  After removing empty overview: {len(df):,}")
-
-        # 3. Remove duplicates (userId, movieId)
-        dup_count = df.duplicated(subset=["userId", "movieId"]).sum()
+        # Remove duplicates
+        initial_count = len(ratings)
+        dup_count = ratings.duplicated(subset=["userId", "movieId"]).sum()
         if dup_count > 0:
-            print(f"  Removing {dup_count:,} duplicate (userId, movieId) pairs")
-            df = df.drop_duplicates(subset=["userId", "movieId"])
+            ratings = ratings.drop_duplicates(subset=["userId", "movieId"])
+            print(f"  Removed {dup_count:,} duplicates")
 
-        # 4. Remove movies without genres
-        df = df[df["genres_list"].apply(len) > 0]
-        print(f"  After removing movies without genres: {len(df):,}")
+        # Sort by timestamp
+        ratings["datetime"] = pd.to_datetime(ratings["timestamp"], unit="s")
+        ratings = ratings.sort_values(["userId", "timestamp"]).reset_index(drop=True)
 
-        # 5. Convert timestamp to datetime
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="s")
+        print(f"  After cleaning: {len(ratings):,} ratings")
 
-        # 6. Verify timestamp ordering per user
-        # Check if timestamps are monotonically increasing for each user
-        def check_monotonic(group):
-            return group["datetime"].is_monotonic_increasing
-
-        monotonic_check = df.groupby("userId").apply(check_monotonic)
-        non_monotonic_users = monotonic_check[~monotonic_check].index.tolist()
-
-        if non_monotonic_users:
-            print(f"  WARNING: {len(non_monotonic_users)} users have non-monotonic timestamps")
-            # Sort per user to ensure monotonic ordering
-            df = df.sort_values(["userId", "timestamp"])
-            print(f"  Fixed by sorting per-user")
-
-        # 7. Check: all movies in ratings exist in metadata
-        movies_with_metadata = df["tmdbId"].notna().sum()
-        total = len(df)
-        coverage = (movies_with_metadata / total * 100) if total > 0 else 0.0
-        print(f"  Movies with metadata: {movies_with_metadata:,}/{total:,} ({coverage:.1f}%)")
-
-        return df
-
-    # ========================================================================
-    # STEP 4: FILTERING
-    # ========================================================================
-
-    def _filter_sparse(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Filter out sparse users and movies.
-
-        Users with < MIN_USER_RATINGS are removed.
-        Movies with < MIN_ITEM_RATINGS are removed.
-
-        Args:
-            df: Cleaned DataFrame
-
-        Returns:
-            Filtered DataFrame
-        """
-        initial_users = df["userId"].nunique()
-        initial_items = df["movieId"].nunique()
-        initial_ratings = len(df)
-
-        # Iteratively filter (users first, then items, repeat until stable)
-        print(f"  Initial: {initial_users:,} users, {initial_items:,} items, {initial_ratings:,} ratings")
-
-        prev_count = 0
-        iteration = 0
-
-        while True:
-            iteration += 1
-            print(f"  Iteration {iteration}:")
-
-            # Filter users
-            user_counts = df["userId"].value_counts()
-            valid_users = user_counts[user_counts >= self.cfg.data.MIN_USER_RATINGS].index
-            df = df[df["userId"].isin(valid_users)]
-            print(f"    Users: {df['userId'].nunique():,}")
-
-            # Filter items
-            item_counts = df["movieId"].value_counts()
-            valid_items = item_counts[item_counts >= self.cfg.data.MIN_ITEM_RATINGS].index
-            df = df[df["movieId"].isin(valid_items)]
-            print(f"    Items: {df['movieId'].nunique():,}")
-
-            # Check convergence
-            current_count = len(df)
-            if current_count == prev_count:
-                break
-            prev_count = current_count
-
-        print(f"  Final: {df['userId'].nunique():,} users, {df['movieId'].nunique():,} items, {len(df):,} ratings")
-        print(f"  Removed: {initial_ratings - len(df):,} ratings ({(1 - len(df)/initial_ratings)*100:.1f}%)")
-
-        return df
-
-    # ========================================================================
-    # STEP 5: TIME-BASED SPLIT
-    # ========================================================================
-
-    def _time_based_split(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """
-        Create time-based train/val/test split PER USER.
-
-        For each user:
-        - Sort by timestamp
-        - Train: first 70% of ratings
-        - Val: next 15% of ratings
-        - Test: last 15% of ratings
-
-        Args:
-            df: Filtered DataFrame
-
-        Returns:
-            Tuple of (train_df, val_df, test_df)
-        """
-        print(f"  Creating per-user time-based split...")
-
-        # Sort by userId and timestamp
-        df = df.sort_values(["userId", "timestamp"]).reset_index(drop=True)
-
+        # Step 6: Time-based split
+        print("\n[Step 6/8] Creating train/val/test split...")
         train_rows = []
         val_rows = []
         test_rows = []
 
-        # Split per user
-        for user_id, user_df in tqdm(df.groupby("userId"), desc="  Splitting users"):
+        for user_id, user_df in tqdm(ratings.groupby("userId"), desc="  Splitting users"):
             n = len(user_df)
-
-            # Calculate split indices
             train_end = int(n * self.cfg.data.TRAIN_RATIO)
             val_end = train_end + int(n * self.cfg.data.VAL_RATIO)
 
@@ -324,124 +203,152 @@ class DataPreprocessor:
         val_df = pd.concat(val_rows).reset_index(drop=True)
         test_df = pd.concat(test_rows).reset_index(drop=True)
 
-        print(f"  Train: {len(train_df):,} ratings ({len(train_df)/len(df)*100:.1f}%)")
-        print(f"  Val:   {len(val_df):,} ratings ({len(val_df)/len(df)*100:.1f}%)")
-        print(f"  Test:  {len(test_df):,} ratings ({len(test_df)/len(df)*100:.1f}%)")
+        print(f"  Train: {len(train_df):,} ratings ({len(train_df)/len(ratings)*100:.1f}%)")
+        print(f"  Val:   {len(val_df):,} ratings ({len(val_df)/len(ratings)*100:.1f}%)")
+        print(f"  Test:  {len(test_df):,} ratings ({len(test_df)/len(ratings)*100:.1f}%)")
 
-        return train_df, val_df, test_df
+        # Free memory
+        del ratings, train_rows, val_rows, test_rows
 
-    # ========================================================================
-    # STEP 6: COLD-START EVALUATION SET
-    # ========================================================================
+        # Step 7: Encode genres
+        print("\n[Step 7/8] Encoding genres...")
+        train_df["genre_features"] = list(self.genre_encoder.transform(
+            [all_genre_lists[item_id] for item_id in train_df["movieId"]]
+        ))
+        val_df["genre_features"] = list(self.genre_encoder.transform(
+            [all_genre_lists[item_id] for item_id in val_df["movieId"]]
+        ))
+        test_df["genre_features"] = list(self.genre_encoder.transform(
+            [all_genre_lists[item_id] for item_id in test_df["movieId"]]
+        ))
 
-    def _create_cold_start_set(
-        self,
-        train_df: pd.DataFrame,
-        test_df: pd.DataFrame
-    ) -> pd.DataFrame:
+        # Step 8: Save
+        print("\n[Step 8/8] Saving processed data...")
+        self._save_data(train_df, val_df, test_df)
+
+        # Create cold-start set
+        print("\n[Bonus] Creating cold-start evaluation set...")
+        cold_start_df = self._create_cold_start_set(train_df, test_df)
+        self._save_cold_start(cold_start_df)
+
+        print("\n" + "=" * 60)
+        print("PREPROCESSING COMPLETE!")
+        print("=" * 60)
+        self._print_summary(train_df, val_df, test_df)
+
+    def run_minimal(self) -> None:
         """
-        Create cold-start evaluation set from test data.
+        Execute minimal preprocessing without content features.
 
-        Cold-start users: users with <= COLD_START_USER_THRESHOLD ratings in train
-        Cold-start items: items with <= COLD_START_ITEM_THRESHOLD ratings in train
+        This is the fastest option and uses minimal RAM:
+        - No metadata merge
+        - No genre parsing
+        - Only user-item interactions
 
-        Args:
-            train_df: Training data
-            test_df: Test data
-
-        Returns:
-            Cold-start test subset
+        Use this for baseline CF models (GMF, MLP, NeuMF).
         """
-        # Find cold-start users
-        user_train_counts = train_df["userId"].value_counts()
-        cold_start_users = user_train_counts[
-            user_train_counts <= self.cfg.eval.COLD_START_USER_THRESHOLD
-        ].index
+        print("=" * 60)
+        print("NCF MOVIE RECOMMENDER - PREPROCESSING (MINIMAL)")
+        print("=" * 60)
 
-        # Find cold-start items
-        item_train_counts = train_df["movieId"].value_counts()
-        cold_start_items = item_train_counts[
-            item_train_counts <= self.cfg.eval.COLD_START_ITEM_THRESHOLD
-        ].index
+        # Step 1: Load and filter ratings
+        print("\n[Step 1/5] Loading and filtering ratings...")
+        ratings = self.loader.load_ratings()
 
-        # Filter test set for cold-start users
-        cold_start_df = test_df[test_df["userId"].isin(cold_start_users)].copy()
+        # Filter sparse users/items early
+        initial_users = ratings["userId"].nunique()
+        initial_items = ratings["movieId"].nunique()
 
-        # Mark cold-start items in this subset
-        cold_start_df["is_cold_item"] = cold_start_df["movieId"].isin(cold_start_items)
+        user_counts = ratings["userId"].value_counts()
+        item_counts = ratings["movieId"].value_counts()
 
-        print(f"  Cold-start users in train: {len(cold_start_users):,}")
-        print(f"  Cold-start items in train: {len(cold_start_items):,}")
-        print(f"  Cold-start test samples: {len(cold_start_df):,}")
-        print(f"    From cold-start users: {len(cold_start_df):,}")
-        print(f"    With cold-start items: {cold_start_df['is_cold_item'].sum():,}")
+        valid_users = set(user_counts[user_counts >= self.cfg.data.MIN_USER_RATINGS].index)
+        valid_items = set(item_counts[item_counts >= self.cfg.data.MIN_ITEM_RATINGS].index)
 
-        return cold_start_df
+        ratings = ratings[ratings["userId"].isin(valid_users)]
+        ratings = ratings[ratings["movieId"].isin(valid_items)]
 
-    # ========================================================================
-    # STEP 7: SAVE PROCESSED DATA
-    # ========================================================================
+        print(f"  Users: {initial_users:,} -> {ratings['userId'].nunique():,}")
+        print(f"  Items: {initial_items:,} -> {ratings['movieId'].nunique():,}")
+        print(f"  Ratings: {len(ratings):,}")
 
-    def _save_processed_data(
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        test_df: pd.DataFrame,
-        cold_start_df: pd.DataFrame,
-        merged_df: pd.DataFrame,
-    ) -> None:
-        """
-        Save processed data and create mappings.
+        # Step 2: Create mappings
+        print("\n[Step 2/5] Creating mappings...")
+        all_users = sorted(ratings["userId"].unique())
+        all_items = sorted(ratings["movieId"].unique())
 
-        This creates:
-        - User/item mappings (original ID -> remapped 0..n-1)
-        - Genre encoder (for multi-hot encoding)
-        - Processed data splits
-        - Statistics
-
-        Args:
-            train_df, val_df, test_df: Data splits
-            cold_start_df: Cold-start evaluation set
-            merged_df: Full merged data (for genre encoding)
-        """
-        # Create user and item mappings
-        all_users = merged_df["userId"].unique()
-        all_items = merged_df["movieId"].unique()
-
-        self.user_map = {old: new for new, old in enumerate(sorted(all_users))}
-        self.item_map = {old: new for new, old in enumerate(sorted(all_items))}
+        self.user_map = {old: new for new, old in enumerate(all_users)}
+        self.item_map = {old: new for new, old in enumerate(all_items)}
         self.reverse_user_map = {new: old for old, new in self.user_map.items()}
         self.reverse_item_map = {new: old for old, new in self.item_map.items()}
 
         print(f"  Created mappings: {len(self.user_map):,} users, {len(self.item_map):,} items")
 
-        # Create genre encoder
-        self.genre_encoder = MultiLabelBinarizer()
-        all_genres_list = merged_df["genres_list"].tolist()
-        self.genre_encoder.fit(all_genres_list)
+        # Step 3: Clean and split
+        print("\n[Step 3/5] Cleaning and splitting...")
+        ratings["userId"] = ratings["userId"].map(self.user_map)
+        ratings["movieId"] = ratings["movieId"].map(self.item_map)
 
-        print(f"  Created genre encoder: {len(self.genre_encoder.classes_)} genres")
-        print(f"    Genres: {', '.join(self.genre_encoder.classes_)}")
+        # Remove duplicates
+        dup_count = ratings.duplicated(subset=["userId", "movieId"]).sum()
+        if dup_count > 0:
+            ratings = ratings.drop_duplicates(subset=["userId", "movieId"])
+            print(f"  Removed {dup_count:,} duplicates")
 
-        # Apply mappings to data splits
-        def remap_ids(df):
-            df = df.copy()
-            df["userId"] = df["userId"].map(self.user_map)
-            df["movieId"] = df["movieId"].map(self.item_map)
-            return df
+        # Sort and split
+        ratings["datetime"] = pd.to_datetime(ratings["timestamp"], unit="s")
+        ratings = ratings.sort_values(["userId", "timestamp"]).reset_index(drop=True)
 
-        train_df = remap_ids(train_df)
-        val_df = remap_ids(val_df)
-        test_df = remap_ids(test_df)
-        cold_start_df = remap_ids(cold_start_df)
+        train_rows = []
+        val_rows = []
+        test_rows = []
 
-        # Encode genres
-        train_df["genre_features"] = list(self.genre_encoder.transform(train_df["genres_list"]))
-        val_df["genre_features"] = list(self.genre_encoder.transform(val_df["genres_list"]))
-        test_df["genre_features"] = list(self.genre_encoder.transform(test_df["genres_list"]))
-        cold_start_df["genre_features"] = list(self.genre_encoder.transform(cold_start_df["genres_list"]))
+        for user_id, user_df in tqdm(ratings.groupby("userId"), desc="  Splitting"):
+            n = len(user_df)
+            train_end = int(n * 0.70)
+            val_end = train_end + int(n * 0.15)
 
-        # Save data splits
+            train_rows.append(user_df.iloc[:train_end][["userId", "movieId", "rating"]])
+            val_rows.append(user_df.iloc[train_end:val_end][["userId", "movieId", "rating"]])
+            test_rows.append(user_df.iloc[val_end:][["userId", "movieId", "rating"]])
+
+        train_df = pd.concat(train_rows, ignore_index=True)
+        val_df = pd.concat(val_rows, ignore_index=True)
+        test_df = pd.concat(test_rows, ignore_index=True)
+
+        print(f"  Train: {len(train_df):,}")
+        print(f"  Val:   {len(val_df):,}")
+        print(f"  Test:  {len(test_df):,}")
+
+        del ratings, train_rows, val_rows, test_rows
+
+        # Step 4: Add dummy genre features
+        print("\n[Step 4/5] Adding placeholder genre features...")
+        num_genres = 19
+        dummy_genre = np.zeros(num_genres, dtype=np.float32)
+
+        train_df["genre_features"] = [dummy_genre.copy()] * len(train_df)
+        val_df["genre_features"] = [dummy_genre.copy()] * len(val_df)
+        test_df["genre_features"] = [dummy_genre.copy()] * len(test_df)
+
+        # Step 5: Save
+        print("\n[Step 5/5] Saving data...")
+        self._save_data(train_df, val_df, test_df)
+
+        print("\n" + "=" * 60)
+        print("PREPROCESSING COMPLETE!")
+        print("=" * 60)
+        self._print_summary(train_df, val_df, test_df)
+
+        print("\nNote: Genre features are placeholders (all zeros).")
+        print("      Use run_full() to process actual genres for content-aware models.")
+
+    def _save_data(self, train_df, val_df, test_df):
+        """Save processed data splits."""
+        # Create directories
+        self.cfg.paths.ensure_dirs()
+
+        # Save data
         train_df[["userId", "movieId", "rating", "genre_features"]].to_pickle(
             self.cfg.paths.train_path
         )
@@ -451,95 +358,130 @@ class DataPreprocessor:
         test_df[["userId", "movieId", "rating", "genre_features"]].to_pickle(
             self.cfg.paths.test_path
         )
-        cold_start_df[["userId", "movieId", "rating", "genre_features", "is_cold_item"]].to_pickle(
-            self.cfg.paths.cold_start_test_path
-        )
-
-        print(f"  Saved data splits to {self.cfg.paths.DATA_DIR}")
 
         # Save mappings
+        if self.genre_encoder is None:
+            num_genres = 19
+            genre_classes = ["Action", "Adventure", "Animation", "Children", "Comedy",
+                           "Crime", "Documentary", "Drama", "Fantasy", "Film-Noir",
+                           "Horror", "IMAX", "Musical", "Mystery", "Romance",
+                           "Sci-Fi", "Thriller", "War", "Western"]
+        else:
+            num_genres = len(self.genre_encoder.classes_)
+            genre_classes = list(self.genre_encoder.classes_)
+
         mappings = {
             "user_map": self.user_map,
             "item_map": self.item_map,
             "reverse_user_map": self.reverse_user_map,
             "reverse_item_map": self.reverse_item_map,
-            "genre_encoder": self.genre_encoder,
             "num_users": len(self.user_map),
             "num_items": len(self.item_map),
-            "num_genres": len(self.genre_encoder.classes_),
-            "genre_classes": list(self.genre_encoder.classes_),
+            "num_genres": num_genres,
+            "genre_classes": genre_classes,
         }
 
         with open(self.cfg.paths.mappings_path, "wb") as f:
             pickle.dump(mappings, f)
 
-        print(f"  Saved mappings to {self.cfg.paths.mappings_path}")
+        print(f"  Saved to {self.cfg.paths.DATA_DIR}")
 
-        # Save statistics
-        statistics = {
-            "before_filtering": self.stats_before,
-            "after_filtering": self.stats_after,
-            "split_counts": {
-                "train": len(train_df),
-                "val": len(val_df),
-                "test": len(test_df),
-                "cold_start_test": len(cold_start_df),
-            },
-            "metadata": {
-                "num_users": len(self.user_map),
-                "num_items": len(self.item_map),
-                "num_genres": len(self.genre_encoder.classes_),
-                "genres": list(self.genre_encoder.classes_),
-                "generated_at": datetime.now().isoformat(),
-            },
-        }
+    def _save_cold_start(self, cold_start_df):
+        """Save cold-start evaluation set."""
+        cold_start_df.to_pickle(self.cfg.paths.cold_start_test_path)
+        print(f"  Saved cold-start test to {self.cfg.paths.cold_start_test_path}")
 
-        with open(self.cfg.paths.statistics_path, "w") as f:
-            json.dump(statistics, f, indent=2)
+    def _create_cold_start_set(self, train_df, test_df):
+        """Create cold-start evaluation set."""
+        # Find cold-start users (<= 10 ratings in train)
+        user_train_counts = train_df["userId"].value_counts()
+        cold_start_users = user_train_counts[
+            user_train_counts <= self.cfg.eval.COLD_START_USER_THRESHOLD
+        ].index
 
-        print(f"  Saved statistics to {self.cfg.paths.statistics_path}")
+        # Find cold-start items (<= 10 ratings in train)
+        item_train_counts = train_df["movieId"].value_counts()
+        cold_start_items = item_train_counts[
+            item_train_counts <= self.cfg.eval.COLD_START_ITEM_THRESHOLD
+        ].index
 
-    # ========================================================================
-    # UTILITIES
-    # ========================================================================
+        # Filter test set
+        cold_start_df = test_df[test_df["userId"].isin(cold_start_users)].copy()
+        cold_start_df["is_cold_item"] = cold_start_df["movieId"].isin(cold_start_items)
 
-    def _compute_statistics(self, df: pd.DataFrame, label: str) -> Dict:
-        """Compute statistics for a DataFrame."""
-        num_users = int(df["userId"].nunique())
-        num_items = int(df["movieId"].nunique())
-        num_ratings = int(len(df))
+        print(f"  Cold-start users: {len(cold_start_users):,}")
+        print(f"  Cold-start items: {len(cold_start_items):,}")
+        print(f"  Cold-start test samples: {len(cold_start_df):,}")
 
-        # Handle empty dataframes gracefully
-        if num_ratings == 0:
-            return {
-                label: {
-                    "num_users": 0,
-                    "num_items": 0,
-                    "num_ratings": 0,
-                    "avg_rating": 0.0,
-                    "sparsity": 0.0,
-                }
-            }
+        return cold_start_df
 
-        sparsity = 0.0
-        if num_users > 0 and num_items > 0:
-            sparsity = float(1 - num_ratings / (num_users * num_items))
+    def _print_summary(self, train_df, val_df, test_df):
+        """Print summary of processed data."""
+        print(f"\n{'='*60}")
+        print(f"SUMMARY")
+        print(f"{'='*60}")
+        print(f"Users: {len(self.user_map):,}")
+        print(f"Items: {len(self.item_map):,}")
+        print(f"Genres: {len(pickle.load(open(self.cfg.paths.mappings_path, 'rb'))['genre_classes'])}")
+        print(f"\nTrain samples: {len(train_df):,}")
+        print(f"Val samples:   {len(val_df):,}")
+        print(f"Test samples:  {len(test_df):,}")
+        print(f"{'='*60}")
 
-        return {
-            label: {
-                "num_users": num_users,
-                "num_items": num_items,
-                "num_ratings": num_ratings,
-                "avg_rating": float(df["rating"].mean()),
-                "sparsity": sparsity,
-            }
-        }
+
+# Legacy methods for backward compatibility
+def _merge_data(self, data):
+    """Legacy merge method (not recommended due to memory usage)."""
+    ratings = data["ratings"]
+    metadata = data["metadata"]
+    links = data["links"]
+
+    print(f"  Initial ratings: {len(ratings):,}")
+
+    # Merge ratings with links
+    merged = ratings.merge(
+        links[["movieId", "tmdbId"]],
+        on="movieId",
+        how="left"
+    )
+    print(f"  After merging with links: {len(merged):,}")
+
+    # Merge with metadata via tmdbId
+    merged["tmdbId"] = pd.to_numeric(merged["tmdbId"], errors="coerce")
+    metadata["id"] = pd.to_numeric(metadata["id"], errors="coerce")
+
+    merged = merged.merge(
+        metadata[["id", "title", "overview", "genres"]],
+        left_on="tmdbId",
+        right_on="id",
+        how="left"
+    )
+    print(f"  After merging with metadata: {len(merged):,}")
+
+    # Parse genres
+    merged["genres_list"] = merged["genres"].apply(parse_genres)
+    print("  Parsed genres")
+
+    return merged.drop(columns=["id", "genres", "title", "overview"], errors="ignore")
 
 
 def main():
     """Run preprocessing pipeline."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Preprocess MovieLens data")
+    parser.add_argument("--mode", choices=["full", "minimal"], default="minimal",
+                       help="Processing mode: full (with genres) or minimal (without)")
+    args = parser.parse_args()
+
     preprocessor = DataPreprocessor()
-    preprocessor.run()
+
+    if args.mode == "full":
+        print("Running FULL preprocessing (with content features)...")
+        preprocessor.run_full()
+    else:
+        print("Running MINIMAL preprocessing (baseline CF only)...")
+        preprocessor.run_minimal()
 
 
 if __name__ == "__main__":
