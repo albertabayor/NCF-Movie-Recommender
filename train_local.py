@@ -110,20 +110,22 @@ def main():
 
     # Memory-efficient training settings
     print("\n[4/5] Configuring training for 4GB GPU...")
-    batch_size = 64  # Small batch for 4GB VRAM
+    batch_size = 128  # Larger batch for 4GB VRAM (try 256 if OOM)
     learning_rate = 1e-3
     num_epochs = 30
     num_negatives = 4
+    num_workers = 4  # Parallel data loading
 
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Max epochs: {num_epochs}")
     print(f"  Negatives per positive: {num_negatives}")
+    print(f"  Data loading workers: {num_workers}")
 
     # Estimate training time
     if device == "cuda":
-        # Rough estimate: ~100-150 it/s on 4GB GPU
-        it_per_sec = 120
+        # With num_workers=4, expect ~30-50 it/s on RTX 3050
+        it_per_sec = 40
         total_steps = len(train_users) // batch_size
         time_per_epoch = total_steps / it_per_sec / 60  # minutes
         print(f"\n  Estimated time per epoch: {time_per_epoch:.0f} minutes")
@@ -150,6 +152,7 @@ def main():
         weight_decay=1e-5,
         num_negatives=num_negatives,
         device=device,
+        num_workers=num_workers,
         save_dir=str(config.paths.TRAINED_MODELS_DIR),
         early_stopping_patience=5,
         early_stopping_metric="hr@10",

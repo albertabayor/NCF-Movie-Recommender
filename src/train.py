@@ -208,6 +208,7 @@ def train_model(
     num_negatives: int = 4,
     num_items: int = None,
     device: str = "cuda",
+    num_workers: int = 0,
     save_dir: str = None,
     early_stopping_patience: int = 5,
     early_stopping_metric: str = "hr@10",
@@ -269,8 +270,8 @@ def train_model(
         dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # Set to >0 for multi-processing
-        pin_memory=(device.type == "cuda"),  # Only pin memory if using GPU
+        num_workers=num_workers,
+        pin_memory=(device.type == "cuda" if isinstance(device, torch.device) else device == "cuda"),
     )
 
     # Optimizer and loss
