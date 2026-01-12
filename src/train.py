@@ -134,6 +134,7 @@ def train_epoch(
     device: torch.device,
     max_grad_norm: float = 5.0,
     epoch: int = 0,
+    scaler: torch.cuda.amp.GradScaler = None,
 ) -> float:
     """
     Train for one epoch.
@@ -145,7 +146,8 @@ def train_epoch(
         criterion: Loss function
         device: Device to train on
         max_grad_norm: Max gradient norm for clipping
-        epoch: Current epoch number (for progress bar)
+        epoch: Current epoch number (for progress bar
+        scaler: GradScaler for mixed precision training (optional)
 
     Returns:
         Average loss for the epoch
@@ -153,6 +155,8 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
+
+    use_amp = scaler is not None
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch in pbar:
@@ -162,30 +166,56 @@ def train_epoch(
 
         optimizer.zero_grad()
 
-        # Forward pass for positives
-        pos_output = model(users, pos_items)
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                # Forward pass for positives
+                pos_output = model(users, pos_items)
 
-        # Forward pass for negatives (need to reshape)
-        batch_size = users.size(0)
-        num_neg = neg_items.size(1)
+                # Forward pass for negatives (need to reshape)
+                batch_size = users.size(0)
+                num_neg = neg_items.size(1)
 
-        # Expand users for each negative
-        users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
-        neg_items_flat = neg_items.reshape(batch_size * num_neg)
+                # Expand users for each negative
+                users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
+                neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
-        neg_output = model(users_expanded, neg_items_flat)
-        neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
+                neg_output = model(users_expanded, neg_items_flat)
+                neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
-        # Compute loss
-        loss = criterion(pos_output, neg_output)
+                # Compute loss
+                loss = criterion(pos_output, neg_output)
 
-        # Backward pass
-        loss.backward()
+            # Backward pass with scaler
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Forward pass for positives
+            pos_output = model(users, pos_items)
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            # Forward pass for negatives (need to reshape)
+            batch_size = users.size(0)
+            num_neg = neg_items.size(1)
 
-        optimizer.step()
+            # Expand users for each negative
+            users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
+            neg_items_flat = neg_items.reshape(batch_size * num_neg)
+
+            neg_output = model(users_expanded, neg_items_flat)
+            neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
+
+            # Compute loss
+            loss = criterion(pos_output, neg_output)
+
+            # Backward pass
+            loss.backward()
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+            optimizer.step()
 
         total_loss += loss.item()
         num_batches += 1
@@ -209,6 +239,7 @@ def train_model(
     num_items: int = None,
     device: str = "cuda",
     num_workers: int = 0,
+    use_amp: bool = False,
     save_dir: str = None,
     early_stopping_patience: int = 5,
     early_stopping_metric: str = "hr@10",
@@ -291,6 +322,11 @@ def train_model(
         min_lr=1e-6,
     )
 
+    # Mixed precision training (AMP)
+    scaler = torch.cuda.amp.GradScaler() if use_amp and device.type == "cuda" else None
+    if scaler:
+        print("  Mixed precision training enabled (FP16)")
+
     # TensorBoard writer
     writer = SummaryWriter(log_dir)
 
@@ -317,6 +353,7 @@ def train_model(
             device=device,
             max_grad_norm=gradient_clip_max_norm,
             epoch=epoch,
+            scaler=scaler,
         )
 
         history["train_loss"].append(train_loss)
