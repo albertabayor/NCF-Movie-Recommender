@@ -49,15 +49,19 @@ def check_gpu():
 
 def print_memory_usage():
     """Print current memory usage."""
-    import psutil
-    process = psutil.Process()
-    mem_info = process.memory_info()
-    system_mem = psutil.virtual_memory()
+    try:
+        import psutil
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        system_mem = psutil.virtual_memory()
 
-    print(f"\nMemory Usage:")
-    print(f"  Process: {mem_info.rss / 1e9:.2f} GB")
-    print(f"  System:  {(system_mem.total - system_mem.available) / 1e9:.2f} GB / {system_mem.total / 1e9:.2f} GB")
-    print(f"  System %: {system_mem.percent:.1f}%")
+        print(f"\nMemory Usage:")
+        print(f"  Process: {mem_info.rss / 1e9:.2f} GB")
+        print(f"  System:  {(system_mem.total - system_mem.available) / 1e9:.2f} GB / {system_mem.total / 1e9:.2f} GB")
+        print(f"  System %: {system_mem.percent:.1f}%")
+    except ImportError:
+        print("\nMemory usage monitoring unavailable (psutil not installed)")
+        print("  Install with: pip install psutil")
 
 
 def main():
