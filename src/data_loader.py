@@ -12,6 +12,7 @@ References:
 - TMDB Metadata: https://www.themoviedb.org/
 """
 
+import ast
 import json
 import os
 from typing import Dict, List, Optional, Tuple
@@ -211,10 +212,14 @@ class DataLoader:
 
 def parse_genres(genres_json: str) -> List[str]:
     """
-    Parse genres from JSON string.
+    Parse genres from JSON or Python list string.
+
+    The movies_metadata.csv stores genres as Python list notation
+    (single quotes) rather than proper JSON (double quotes).
 
     Args:
-        genres_json: JSON string like '[{"id": 1, "name": "Action"}, ...]'
+        genres_json: String like '[{"id": 1, "name": "Action"}, ...]'
+                     or [{'id': 1, 'name': 'Action'}, ...]
 
     Returns:
         List of genre names
@@ -222,10 +227,18 @@ def parse_genres(genres_json: str) -> List[str]:
     if pd.isna(genres_json) or genres_json == "":
         return []
 
+    # Try JSON first (standard format with double quotes)
     try:
         genres = json.loads(genres_json)
         return [g["name"] for g in genres]
     except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    # Try Python literal evaluation (for single-quoted format)
+    try:
+        genres = ast.literal_eval(genres_json)
+        return [g["name"] for g in genres]
+    except (ValueError, SyntaxError, KeyError, TypeError):
         return []
 
 
