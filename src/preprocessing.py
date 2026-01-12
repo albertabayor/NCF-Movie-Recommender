@@ -197,7 +197,7 @@ class DataPreprocessor:
             df = df.drop_duplicates(subset=["userId", "movieId"])
 
         # 4. Remove movies without genres
-        df = df[df["genres_list"].str.len() > 0]
+        df = df[df["genres_list"].apply(len) > 0]
         print(f"  After removing movies without genres: {len(df):,}")
 
         # 5. Convert timestamp to datetime
@@ -220,7 +220,7 @@ class DataPreprocessor:
         # 7. Check: all movies in ratings exist in metadata
         movies_with_metadata = df["tmdbId"].notna().sum()
         total = len(df)
-        coverage = movies_with_metadata / total * 100
+        coverage = (movies_with_metadata / total * 100) if total > 0 else 0.0
         print(f"  Movies with metadata: {movies_with_metadata:,}/{total:,} ({coverage:.1f}%)")
 
         return df
@@ -505,15 +505,33 @@ class DataPreprocessor:
 
     def _compute_statistics(self, df: pd.DataFrame, label: str) -> Dict:
         """Compute statistics for a DataFrame."""
+        num_users = int(df["userId"].nunique())
+        num_items = int(df["movieId"].nunique())
+        num_ratings = int(len(df))
+
+        # Handle empty dataframes gracefully
+        if num_ratings == 0:
+            return {
+                label: {
+                    "num_users": 0,
+                    "num_items": 0,
+                    "num_ratings": 0,
+                    "avg_rating": 0.0,
+                    "sparsity": 0.0,
+                }
+            }
+
+        sparsity = 0.0
+        if num_users > 0 and num_items > 0:
+            sparsity = float(1 - num_ratings / (num_users * num_items))
+
         return {
             label: {
-                "num_users": int(df["userId"].nunique()),
-                "num_items": int(df["movieId"].nunique()),
-                "num_ratings": int(len(df)),
+                "num_users": num_users,
+                "num_items": num_items,
+                "num_ratings": num_ratings,
                 "avg_rating": float(df["rating"].mean()),
-                "sparsity": float(
-                    1 - len(df) / (df["userId"].nunique() * df["movieId"].nunique())
-                ),
+                "sparsity": sparsity,
             }
         }
 
