@@ -270,7 +270,7 @@ def train_model(
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,  # Set to >0 for multi-processing
-        pin_memory=True,
+        pin_memory=(device.type == "cuda"),  # Only pin memory if using GPU
     )
 
     # Optimizer and loss
