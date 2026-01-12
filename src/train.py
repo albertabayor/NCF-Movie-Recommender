@@ -174,7 +174,7 @@ def train_epoch(
         neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
         neg_output = model(users_expanded, neg_items_flat)
-        neg_output = neg_output.reshape(batch_size, num_neg, -1)  # (batch, num_neg, 1)
+        neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
         # Compute loss
         loss = criterion(pos_output, neg_output)
