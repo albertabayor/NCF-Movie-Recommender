@@ -3,8 +3,7 @@
 Memory-efficient local training script for NCF models.
 
 Designed for systems with limited GPU VRAM (4GB) and system RAM.
-Uses smaller batch size and gradient accumulation to maintain
-training quality while staying within memory limits.
+Uses mixed precision training and optimized batch sizes.
 """
 
 import os
@@ -33,14 +32,12 @@ def check_gpu():
 
         # Recommend batch size based on VRAM
         if gpu_memory_gb < 6:
-            recommended_batch = 64
-            print(f"  Recommended batch size: {recommended_batch} (4GB GPU)")
-        elif gpu_memory_gb < 12:
             recommended_batch = 128
-            print(f"  Recommended batch size: {recommended_batch} (8GB GPU)")
-        else:
+        elif gpu_memory_gb < 12:
             recommended_batch = 256
-            print(f"  Recommended batch size: {recommended_batch} (12GB+ GPU)")
+        else:
+            recommended_batch = 512
+        print(f"  Recommended batch size: {recommended_batch}")
         return device, recommended_batch
     else:
         print("⚠️  No GPU detected. Training on CPU will be very slow.")
@@ -61,7 +58,6 @@ def print_memory_usage():
         print(f"  System %: {system_mem.percent:.1f}%")
     except ImportError:
         print("\nMemory usage monitoring unavailable (psutil not installed)")
-        print("  Install with: pip install psutil")
 
 
 def main():
@@ -74,7 +70,7 @@ def main():
     device, recommended_batch = check_gpu()
 
     # Load preprocessed data
-    print("\n[1/5] Loading data...")
+    print("\n[1/6] Loading data...")
     train_df = pd.read_pickle(config.paths.train_path)
     val_df = pd.read_pickle(config.paths.val_path)
     test_df = pd.read_pickle(config.paths.test_path)
@@ -85,54 +81,72 @@ def main():
     num_users = mappings["num_users"]
     num_items = mappings["num_items"]
 
+    # Optional: Sample subset for faster training
+    SAMPLE_RATIO = os.environ.get("SAMPLE_RATIO", "0.2")
+    SAMPLE_RATIO = float(SAMPLE_RATIO)
+
+    if SAMPLE_RATIO < 1.0:
+        print(f"\n[2/6] Sampling {SAMPLE_RATIO*100:.0f}% of training data...")
+        np.random.seed(42)
+        sample_idx = np.random.choice(
+            len(train_df),
+            int(len(train_df) * SAMPLE_RATIO),
+            replace=False
+        )
+        train_df = train_df.iloc[sample_idx].copy()
+        print(f"  Sampled: {len(train_df):,} ratings (was {len(train_df):,})")
+
     train_users = train_df["userId"].values
     train_items = train_df["movieId"].values
     val_users = val_df["userId"].values
     val_items = val_df["movieId"].values
 
     # Build user history
-    print("\n[2/5] Building user history for negative sampling...")
+    print("\n[3/6] Building user history for negative sampling...")
     user_history = build_user_history(train_users, train_items)
 
     # Print memory usage
     print_memory_usage()
 
     # Create model
-    print("\n[3/5] Creating NeuMF model...")
+    print("\n[4/6] Creating NeuMF model...")
     model = NeuMF(
         num_users=num_users,
         num_items=num_items,
     )
 
+    model = model.to(device)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {param_count:,}")
     print(f"  Estimated model size: {param_count * 4 / 1e6:.1f} MB")
 
-    # Memory-efficient training settings
-    print("\n[4/5] Configuring training for 4GB GPU...")
-    batch_size = 256  # Maximize batch for GPU efficiency
+    # Training settings optimized for 4GB GPU
+    print("\n[5/6] Configuring training...")
+    batch_size = min(recommended_batch, 256)  # Cap at 256 for 4GB VRAM
     learning_rate = 1e-3
     num_epochs = 30
     num_negatives = 4
-    num_workers = 0  # Single worker to minimize RAM (user_history is large)
+    num_workers = 0  # Single worker to save RAM
+    use_amp = (device == "cuda")  # Enable mixed precision on GPU
 
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Max epochs: {num_epochs}")
     print(f"  Negatives per positive: {num_negatives}")
-    print(f"  Data loading workers: {num_workers} (single worker to save RAM)")
+    print(f"  Data workers: {num_workers}")
+    print(f"  Mixed precision (FP16): {use_amp}")
 
     # Estimate training time
     if device == "cuda":
-        # Expect ~5-10 it/s on RTX 3050 with this dataset size
-        it_per_sec = 8
+        # RTX 3050 Laptop: expect ~3-5 it/s with batch=256
+        it_per_sec = 4
         total_steps = len(train_users) // batch_size
         time_per_epoch = total_steps / it_per_sec / 60  # minutes
         print(f"\n  Estimated time per epoch: {time_per_epoch:.0f} minutes")
-        print(f"  Estimated total time: {time_per_epoch * 5:.0f} minutes (assuming ~5 epochs)")
+        print(f"  Estimated total time: {time_per_epoch * 5:.0f} minutes (~{time_per_epoch * 5 / 60:.1f} hours)")
 
     # Train
-    print("\n[5/5] Starting training...")
+    print("\n[6/6] Starting training...")
     print("  Models will save to: experiments/trained_models/")
     print("  Best model saves automatically (based on HR@10)")
     print("\n" + "=" * 60)
@@ -153,6 +167,7 @@ def main():
         num_negatives=num_negatives,
         device=device,
         num_workers=num_workers,
+        use_amp=use_amp,
         save_dir=str(config.paths.TRAINED_MODELS_DIR),
         early_stopping_patience=5,
         early_stopping_metric="hr@10",
