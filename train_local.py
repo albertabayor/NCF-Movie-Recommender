@@ -110,22 +110,22 @@ def main():
 
     # Memory-efficient training settings
     print("\n[4/5] Configuring training for 4GB GPU...")
-    batch_size = 128  # Larger batch for 4GB VRAM (try 256 if OOM)
+    batch_size = 256  # Maximize batch for GPU efficiency
     learning_rate = 1e-3
     num_epochs = 30
     num_negatives = 4
-    num_workers = 4  # Parallel data loading
+    num_workers = 0  # Single worker to minimize RAM (user_history is large)
 
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {learning_rate}")
     print(f"  Max epochs: {num_epochs}")
     print(f"  Negatives per positive: {num_negatives}")
-    print(f"  Data loading workers: {num_workers}")
+    print(f"  Data loading workers: {num_workers} (single worker to save RAM)")
 
     # Estimate training time
     if device == "cuda":
-        # With num_workers=4, expect ~30-50 it/s on RTX 3050
-        it_per_sec = 40
+        # Expect ~5-10 it/s on RTX 3050 with this dataset size
+        it_per_sec = 8
         total_steps = len(train_users) // batch_size
         time_per_epoch = total_steps / it_per_sec / 60  # minutes
         print(f"\n  Estimated time per epoch: {time_per_epoch:.0f} minutes")
