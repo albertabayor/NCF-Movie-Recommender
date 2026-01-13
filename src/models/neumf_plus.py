@@ -364,6 +364,58 @@ class NeuMFPlus(nn.Module):
         """Get the device this model is on."""
         return next(self.parameters()).device
 
+    def save(self, path: str, epoch: int = None, metrics: dict = None):
+        """
+        Save model checkpoint.
+
+        Args:
+            path: Path to save the checkpoint
+            epoch: Current epoch number (optional)
+            metrics: Validation metrics (optional)
+        """
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'model_config': {
+                'num_users': self.num_users,
+                'num_items': self.num_items,
+                'num_genres': self.num_genres,
+                'use_genre': self.use_genre,
+                'use_synopsis': self.use_synopsis,
+                'use_gated_fusion': self.use_gated_fusion,
+            },
+            'epoch': epoch,
+            'metrics': metrics or {},
+        }
+        torch.save(checkpoint, path)
+
+    @classmethod
+    def load(cls, path: str, device: str = 'cuda'):
+        """
+        Load model from checkpoint.
+
+        Args:
+            path: Path to checkpoint
+            device: Device to load model on
+
+        Returns:
+            Loaded model
+        """
+        checkpoint = torch.load(path, map_location=device)
+        config = checkpoint['model_config']
+
+        model = cls(
+            num_users=config['num_users'],
+            num_items=config['num_items'],
+            num_genres=config['num_genres'],
+            use_genre=config['use_genre'],
+            use_synopsis=config['use_synopsis'],
+            use_gated_fusion=config['use_gated_fusion'],
+        )
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model = model.to(device)
+
+        return model, checkpoint
+
 
 def create_neumf_plus_variant(
     variant: str,
