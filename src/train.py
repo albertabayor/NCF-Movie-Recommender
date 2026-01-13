@@ -39,6 +39,7 @@ class NCFDataset(Dataset):
         num_items: Total number of items
         user_history: Dict mapping user -> set of interacted items
         genre_features: Array of genre features (optional, for NeuMF+)
+        synopsis_features: Array of synopsis features (optional, for NeuMF+)
         sampling_strategy: 'uniform' or 'popularity'
     """
 
@@ -50,6 +51,7 @@ class NCFDataset(Dataset):
         num_items: int,
         user_history: Dict[int, set],
         genre_features: Optional[np.ndarray] = None,
+        synopsis_features: Optional[np.ndarray] = None,
         sampling_strategy: str = "uniform",
     ):
         self.users = users
@@ -58,6 +60,7 @@ class NCFDataset(Dataset):
         self.num_items = num_items
         self.user_history = user_history
         self.genre_features = genre_features
+        self.synopsis_features = synopsis_features
         self.sampling_strategy = sampling_strategy
 
     def __len__(self) -> int:
@@ -79,6 +82,10 @@ class NCFDataset(Dataset):
         # Add genre features if available
         if self.genre_features is not None:
             result["genre_features"] = self.genre_features[idx]
+
+        # Add synopsis features if available
+        if self.synopsis_features is not None:
+            result["synopsis_features"] = self.synopsis_features[idx]
 
         return result
 
@@ -373,6 +380,12 @@ def train_model(
         train_sample_genre_features = item_genre_features[train_items]
         print(f"  Per-sample genre features shape: {train_sample_genre_features.shape}")
 
+    # Create per-sample synopsis features for training data
+    train_sample_synopsis_features = None
+    if item_synopsis_features is not None:
+        train_sample_synopsis_features = item_synopsis_features[train_items]
+        print(f"  Per-sample synopsis features shape: {train_sample_synopsis_features.shape}")
+
     # Create dataset and dataloader
     dataset = NCFDataset(
         users=train_users,
@@ -381,6 +394,7 @@ def train_model(
         num_items=num_items,
         user_history=user_history,
         genre_features=train_sample_genre_features,
+        synopsis_features=train_sample_synopsis_features,
     )
     dataloader = DataLoader(
         dataset,
