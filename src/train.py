@@ -38,6 +38,7 @@ class NCFDataset(Dataset):
         num_negatives: Number of negative samples per positive
         num_items: Total number of items
         user_history: Dict mapping user -> set of interacted items
+        genre_features: Array of genre features (optional, for NeuMF+)
         sampling_strategy: 'uniform' or 'popularity'
     """
 
@@ -48,6 +49,7 @@ class NCFDataset(Dataset):
         num_negatives: int,
         num_items: int,
         user_history: Dict[int, set],
+        genre_features: Optional[np.ndarray] = None,
         sampling_strategy: str = "uniform",
     ):
         self.users = users
@@ -55,6 +57,7 @@ class NCFDataset(Dataset):
         self.num_negatives = num_negatives
         self.num_items = num_items
         self.user_history = user_history
+        self.genre_features = genre_features
         self.sampling_strategy = sampling_strategy
 
     def __len__(self) -> int:
@@ -67,11 +70,17 @@ class NCFDataset(Dataset):
         # Sample negative items
         neg_items = self._sample_negatives(user, pos_item)
 
-        return {
+        result = {
             "user": user,
             "pos_item": pos_item,
             "neg_items": neg_items,
         }
+
+        # Add genre features if available
+        if self.genre_features is not None:
+            result["genre_features"] = self.genre_features[idx]
+
+        return result
 
     def _sample_negatives(self, user: int, pos_item: int) -> np.ndarray:
         """Sample negative items for a user."""
@@ -135,6 +144,7 @@ def train_epoch(
     max_grad_norm: float = 5.0,
     epoch: int = 0,
     scaler: torch.cuda.amp.GradScaler = None,
+    genre_features: Optional[np.ndarray] = None,
 ) -> float:
     """
     Train for one epoch.
@@ -146,8 +156,9 @@ def train_epoch(
         criterion: Loss function
         device: Device to train on
         max_grad_norm: Max gradient norm for clipping
-        epoch: Current epoch number (for progress bar
+        epoch: Current epoch number (for progress bar)
         scaler: GradScaler for mixed precision training (optional)
+        genre_features: Full array of genre features for looking up negative item features
 
     Returns:
         Average loss for the epoch
@@ -157,6 +168,10 @@ def train_epoch(
     num_batches = 0
 
     use_amp = scaler is not None
+    has_genre = genre_features is not None
+
+    # Convert genre features to tensor if available
+    genre_tensor = torch.tensor(genre_features, dtype=torch.float32).to(device) if has_genre else None
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch in pbar:
@@ -164,14 +179,19 @@ def train_epoch(
         pos_items = batch["pos_item"].to(device)
         neg_items = batch["neg_items"].to(device)  # (batch, num_neg)
 
+        # Get genre features for positive items
+        pos_genre = batch.get("genre_features")
+        if pos_genre is not None:
+            pos_genre = pos_genre.to(device)
+
         optimizer.zero_grad()
 
         if use_amp:
             with torch.cuda.amp.autocast():
                 # Forward pass for positives
-                pos_output = model(users, pos_items)
+                pos_output = model(users, pos_items, genre_features=pos_genre)
 
-                # Forward pass for negatives (need to reshape)
+                # Forward pass for negatives (need to reshape and get genre features)
                 batch_size = users.size(0)
                 num_neg = neg_items.size(1)
 
@@ -179,7 +199,13 @@ def train_epoch(
                 users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
                 neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
-                neg_output = model(users_expanded, neg_items_flat)
+                # Get genre features for negative items
+                neg_genre = None
+                if genre_tensor is not None:
+                    # Look up genre features for each negative item
+                    neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
+
+                neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
                 neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
                 # Compute loss
@@ -193,9 +219,9 @@ def train_epoch(
             scaler.update()
         else:
             # Forward pass for positives
-            pos_output = model(users, pos_items)
+            pos_output = model(users, pos_items, genre_features=pos_genre)
 
-            # Forward pass for negatives (need to reshape)
+            # Forward pass for negatives (need to reshape and get genre features)
             batch_size = users.size(0)
             num_neg = neg_items.size(1)
 
@@ -203,7 +229,13 @@ def train_epoch(
             users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
             neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
-            neg_output = model(users_expanded, neg_items_flat)
+            # Get genre features for negative items
+            neg_genre = None
+            if genre_tensor is not None:
+                # Look up genre features for each negative item
+                neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
+
+            neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
             neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
             # Compute loss
@@ -247,6 +279,7 @@ def train_model(
     lr_scheduler_factor: float = 0.5,
     gradient_clip_max_norm: float = 5.0,
     log_dir: str = None,
+    train_genre_features: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Train an NCF model with early stopping and learning rate scheduling.
@@ -263,6 +296,8 @@ def train_model(
         num_negatives: Number of negative samples per positive
         num_items: Total number of items (for negative sampling)
         device: Device to train on
+        num_workers: Number of data loading workers
+        use_amp: Use mixed precision training (FP16)
         save_dir: Directory to save checkpoints
         early_stopping_patience: Patience for early stopping
         early_stopping_metric: Metric to monitor for early stopping
@@ -270,6 +305,7 @@ def train_model(
         lr_scheduler_factor: Factor to reduce LR
         gradient_clip_max_norm: Max gradient norm for clipping
         log_dir: TensorBoard log directory
+        train_genre_features: Genre features for training items (for NeuMF+)
 
     Returns:
         Dict with training history
@@ -296,6 +332,7 @@ def train_model(
         num_negatives=num_negatives,
         num_items=num_items,
         user_history=user_history,
+        genre_features=train_genre_features,
     )
     dataloader = DataLoader(
         dataset,
@@ -354,6 +391,7 @@ def train_model(
             max_grad_norm=gradient_clip_max_norm,
             epoch=epoch,
             scaler=scaler,
+            genre_features=train_genre_features,
         )
 
         history["train_loss"].append(train_loss)
@@ -365,15 +403,21 @@ def train_model(
 
         # Validate
         if val_data is not None:
-            val_metrics = evaluate_model(
-                model=model,
-                users=val_data["users"],
-                items=val_data["items"],
-                k_values=[10],
-                device=device,
-                num_items=num_items,
-                user_history=user_history,
-            )
+            # Prepare kwargs for evaluation (including genre_features if available)
+            eval_kwargs = {
+                "model": model,
+                "users": val_data["users"],
+                "items": val_data["items"],
+                "k_values": [10],
+                "device": device,
+                "num_items": num_items,
+                "user_history": user_history,
+            }
+            # Add genre_features to evaluation if available in val_data
+            if "genre_features" in val_data and val_data["genre_features"] is not None:
+                eval_kwargs["genre_features"] = val_data["genre_features"]
+
+            val_metrics = evaluate_model(**eval_kwargs)
             history["val_metrics"].append(val_metrics)
 
             # Log metrics

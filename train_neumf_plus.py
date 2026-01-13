@@ -190,6 +190,7 @@ def main():
         lr_scheduler_patience=3,
         lr_scheduler_factor=0.5,
         log_dir=str(config.paths.TENSORBOARD_LOG_DIR),
+        train_genre_features=train_genre_features,  # Pass genre features for training
     )
 
     print("\n" + "=" * 70)
