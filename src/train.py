@@ -161,7 +161,7 @@ def train_epoch(
     epoch: int = 0,
     scaler: torch.cuda.amp.GradScaler = None,
     item_genre_features: Optional[np.ndarray] = None,
-    item_synopsis_features: Optional[np.ndarray] = None,
+    item_synopsis_embeddings: Optional[np.ndarray] = None,
 ) -> float:
     """
     Train for one epoch.
@@ -177,7 +177,7 @@ def train_epoch(
         scaler: GradScaler for mixed precision training (optional)
         item_genre_features: Full item-to-genre mapping array of shape (num_items, genre_dim)
                             for looking up genre features by item ID
-        item_synopsis_features: Full item-to-synopsis mapping array of shape (num_items, synopsis_dim)
+        item_synopsis_embeddings: Full item-to-synopsis mapping array of shape (num_items, synopsis_dim)
                               for looking up synopsis features by item ID
 
     Returns:
@@ -189,12 +189,12 @@ def train_epoch(
 
     use_amp = scaler is not None
     has_genre = item_genre_features is not None
-    has_synopsis = item_synopsis_features is not None
+    has_synopsis = item_synopsis_embeddings is not None
 
     # Convert item features to tensors if available
     # These are indexed by item ID, not by sample position
     genre_tensor = torch.tensor(item_genre_features, dtype=torch.float32).to(device) if has_genre else None
-    synopsis_tensor = torch.tensor(item_synopsis_features, dtype=torch.float32).to(device) if has_synopsis else None
+    synopsis_tensor = torch.tensor(item_synopsis_embeddings, dtype=torch.float32).to(device) if has_synopsis else None
 
     # Debug: Print first batch keys (only in epoch 1)
     debug_once = (epoch == 1)
@@ -324,7 +324,7 @@ def train_model(
     gradient_clip_max_norm: float = 5.0,
     log_dir: str = None,
     item_genre_features: Optional[np.ndarray] = None,
-    item_synopsis_features: Optional[np.ndarray] = None,
+    item_synopsis_embeddings: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Train an NCF model with early stopping and learning rate scheduling.
@@ -351,7 +351,7 @@ def train_model(
         gradient_clip_max_norm: Max gradient norm for clipping
         log_dir: TensorBoard log directory
         item_genre_features: Item-to-genre mapping array of shape (num_items, genre_dim)
-        item_synopsis_features: Item-to-synopsis mapping array of shape (num_items, synopsis_dim)
+        item_synopsis_embeddings: Item-to-synopsis mapping array of shape (num_items, synopsis_dim)
                             Used for looking up negative item features during training
 
     Returns:
@@ -382,8 +382,8 @@ def train_model(
 
     # Create per-sample synopsis features for training data
     train_sample_synopsis_features = None
-    if item_synopsis_features is not None:
-        train_sample_synopsis_features = item_synopsis_features[train_items]
+    if item_synopsis_embeddings is not None:
+        train_sample_synopsis_features = item_synopsis_embeddings[train_items]
         print(f"  Per-sample synopsis features shape: {train_sample_synopsis_features.shape}")
 
     # Create dataset and dataloader
@@ -454,7 +454,7 @@ def train_model(
             epoch=epoch,
             scaler=scaler,
             item_genre_features=item_genre_features,
-            item_synopsis_features=item_synopsis_features,
+            item_synopsis_embeddings=item_synopsis_embeddings,
         )
 
         history["train_loss"].append(train_loss)
@@ -476,12 +476,12 @@ def train_model(
                 "num_items": num_items,
                 "user_history": user_history,
             }
-            # Add genre_features to evaluation if available in val_data
-            if "genre_features" in val_data and val_data["genre_features"] is not None:
-                eval_kwargs["genre_features"] = val_data["genre_features"]
-            # Add synopsis_features to evaluation if available in val_data
-            if "synopsis_features" in val_data and val_data["synopsis_features"] is not None:
-                eval_kwargs["synopsis_features"] = val_data["synopsis_features"]
+            # Add genre_features to evaluation (item-to-genre mapping indexed by item ID)
+            if item_genre_features is not None:
+                eval_kwargs["genre_features"] = item_genre_features
+            # Add synopsis_embeddings to evaluation (item-to-synopsis mapping indexed by item ID)
+            if item_synopsis_embeddings is not None:
+                eval_kwargs["synopsis_embeddings"] = item_synopsis_embeddings
 
             val_metrics = evaluate_model(**eval_kwargs)
             history["val_metrics"].append(val_metrics)
