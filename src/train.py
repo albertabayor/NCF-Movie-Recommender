@@ -503,10 +503,22 @@ def train_model(
                 best_metric = current_metric
                 patience_counter = 0
 
-                # Save best model
-                save_path = Path(save_dir) / f"{model.__class__.__name__}_best.pt"
+                # Save best model with descriptive name based on config
+                model_name = model.__class__.__name__
+                # Add config suffix for NeuMFPlus models
+                if model_name == "NeuMFPlus":
+                    config_suffix = []
+                    if hasattr(model, 'use_genre') and model.use_genre:
+                        config_suffix.append("genre")
+                    if hasattr(model, 'use_synopsis') and model.use_synopsis:
+                        config_suffix.append("synopsis")
+                    if config_suffix:
+                        model_name = f"NeuMFPlus_{'_'.join(config_suffix)}"
+                    else:
+                        model_name = "NeuMFPlus_cf_only"
+                save_path = Path(save_dir) / f"{model_name}_best.pt"
                 model.save(str(save_path), epoch=epoch, metrics=val_metrics)
-                print(f"  ✓ New best model saved! (HR@10: {best_metric:.4f})")
+                print(f"  ✓ New best model saved as {save_path.name}! (HR@10: {best_metric:.4f})")
             else:
                 patience_counter += 1
                 print(f"  No improvement for {patience_counter} epoch(s)")
