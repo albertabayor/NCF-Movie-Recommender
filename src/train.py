@@ -154,6 +154,7 @@ def train_epoch(
     epoch: int = 0,
     scaler: torch.cuda.amp.GradScaler = None,
     item_genre_features: Optional[np.ndarray] = None,
+    item_synopsis_features: Optional[np.ndarray] = None,
 ) -> float:
     """
     Train for one epoch.
@@ -169,6 +170,8 @@ def train_epoch(
         scaler: GradScaler for mixed precision training (optional)
         item_genre_features: Full item-to-genre mapping array of shape (num_items, genre_dim)
                             for looking up genre features by item ID
+        item_synopsis_features: Full item-to-synopsis mapping array of shape (num_items, synopsis_dim)
+                              for looking up synopsis features by item ID
 
     Returns:
         Average loss for the epoch
@@ -179,21 +182,21 @@ def train_epoch(
 
     use_amp = scaler is not None
     has_genre = item_genre_features is not None
+    has_synopsis = item_synopsis_features is not None
 
-    # Convert item genre features to tensor if available
-    # This is indexed by item ID, not by sample position
+    # Convert item features to tensors if available
+    # These are indexed by item ID, not by sample position
     genre_tensor = torch.tensor(item_genre_features, dtype=torch.float32).to(device) if has_genre else None
+    synopsis_tensor = torch.tensor(item_synopsis_features, dtype=torch.float32).to(device) if has_synopsis else None
 
-    # Debug: Print first batch keys
-    debug_once = True
+    # Debug: Print first batch keys (only in epoch 1)
+    debug_once = (epoch == 1)
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch in pbar:
-        if debug_once and has_genre:
+        if debug_once and (has_genre or has_synopsis):
             print(f"DEBUG: Batch keys: {list(batch.keys())}")
             print(f"DEBUG: genre_features in batch: {'genre_features' in batch}")
-            if 'genre_features' in batch:
-                print(f"DEBUG: genre_features type: {type(batch['genre_features'])}")
-                print(f"DEBUG: genre_features shape: {batch['genre_features'].shape if hasattr(batch['genre_features'], 'shape') else 'N/A'}")
+            print(f"DEBUG: synopsis_features in batch: {'synopsis_features' in batch}")
             debug_once = False
 
         users = batch["user"].to(device)
@@ -205,14 +208,19 @@ def train_epoch(
         if pos_genre is not None:
             pos_genre = pos_genre.to(device)
 
+        # Get synopsis features for positive items (from batch)
+        pos_synopsis = batch.get("synopsis_features")
+        if pos_synopsis is not None:
+            pos_synopsis = pos_synopsis.to(device)
+
         optimizer.zero_grad()
 
         if use_amp:
             with torch.cuda.amp.autocast():
                 # Forward pass for positives
-                pos_output = model(users, pos_items, genre_features=pos_genre)
+                pos_output = model(users, pos_items, genre_features=pos_genre, synopsis_embeddings=pos_synopsis)
 
-                # Forward pass for negatives (need to reshape and get genre features)
+                # Forward pass for negatives (need to reshape and get features)
                 batch_size = users.size(0)
                 num_neg = neg_items.size(1)
 
@@ -223,10 +231,14 @@ def train_epoch(
                 # Get genre features for negative items (lookup by item ID)
                 neg_genre = None
                 if genre_tensor is not None:
-                    # Look up genre features for each negative item by their item ID
                     neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
 
-                neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
+                # Get synopsis features for negative items (lookup by item ID)
+                neg_synopsis = None
+                if synopsis_tensor is not None:
+                    neg_synopsis = synopsis_tensor[neg_items_flat]  # (batch * num_neg, synopsis_dim)
+
+                neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre, synopsis_embeddings=neg_synopsis)
                 neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
                 # Compute loss
@@ -240,9 +252,9 @@ def train_epoch(
             scaler.update()
         else:
             # Forward pass for positives
-            pos_output = model(users, pos_items, genre_features=pos_genre)
+            pos_output = model(users, pos_items, genre_features=pos_genre, synopsis_embeddings=pos_synopsis)
 
-            # Forward pass for negatives (need to reshape and get genre features)
+            # Forward pass for negatives (need to reshape and get features)
             batch_size = users.size(0)
             num_neg = neg_items.size(1)
 
@@ -253,10 +265,14 @@ def train_epoch(
             # Get genre features for negative items (lookup by item ID)
             neg_genre = None
             if genre_tensor is not None:
-                # Look up genre features for each negative item by their item ID
-                neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
+                neg_genre = genre_tensor[neg_items_flat]
 
-            neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
+            # Get synopsis features for negative items (lookup by item ID)
+            neg_synopsis = None
+            if synopsis_tensor is not None:
+                neg_synopsis = synopsis_tensor[neg_items_flat]
+
+            neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre, synopsis_embeddings=neg_synopsis)
             neg_output = neg_output.squeeze().reshape(batch_size, num_neg)  # (batch, num_neg)
 
             # Compute loss
@@ -301,6 +317,7 @@ def train_model(
     gradient_clip_max_norm: float = 5.0,
     log_dir: str = None,
     item_genre_features: Optional[np.ndarray] = None,
+    item_synopsis_features: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Train an NCF model with early stopping and learning rate scheduling.
@@ -309,7 +326,7 @@ def train_model(
         model: NCF model to train
         train_users: Training user IDs
         train_items: Training item IDs
-        val_data: Validation data dict with 'users', 'items', (optional) 'genre_features'
+        val_data: Validation data dict with 'users', 'items', (optional) 'genre_features', 'synopsis_features'
         num_epochs: Maximum number of epochs
         batch_size: Batch size for training
         learning_rate: Initial learning rate
@@ -327,6 +344,7 @@ def train_model(
         gradient_clip_max_norm: Max gradient norm for clipping
         log_dir: TensorBoard log directory
         item_genre_features: Item-to-genre mapping array of shape (num_items, genre_dim)
+        item_synopsis_features: Item-to-synopsis mapping array of shape (num_items, synopsis_dim)
                             Used for looking up negative item features during training
 
     Returns:
@@ -422,6 +440,7 @@ def train_model(
             epoch=epoch,
             scaler=scaler,
             item_genre_features=item_genre_features,
+            item_synopsis_features=item_synopsis_features,
         )
 
         history["train_loss"].append(train_loss)
@@ -433,7 +452,7 @@ def train_model(
 
         # Validate
         if val_data is not None:
-            # Prepare kwargs for evaluation (including genre_features if available)
+            # Prepare kwargs for evaluation (including genre/synopsis_features if available)
             eval_kwargs = {
                 "model": model,
                 "users": val_data["users"],
@@ -446,6 +465,9 @@ def train_model(
             # Add genre_features to evaluation if available in val_data
             if "genre_features" in val_data and val_data["genre_features"] is not None:
                 eval_kwargs["genre_features"] = val_data["genre_features"]
+            # Add synopsis_features to evaluation if available in val_data
+            if "synopsis_features" in val_data and val_data["synopsis_features"] is not None:
+                eval_kwargs["synopsis_features"] = val_data["synopsis_features"]
 
             val_metrics = evaluate_model(**eval_kwargs)
             history["val_metrics"].append(val_metrics)
