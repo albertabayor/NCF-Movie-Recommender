@@ -292,10 +292,27 @@ class NeuMFPlus(nn.Module):
         # ===== Content Branch =====
         content_embed = None
         if self.use_genre and self.use_synopsis:
+            # Ensure genre_features and synopsis_embeddings are provided
+            if genre_features is None or synopsis_embeddings is None:
+                raise ValueError(
+                    f"use_genre={self.use_genre} and use_synopsis={self.use_synopsis} "
+                    f"but genre_features={genre_features is not None} and "
+                    f"synopsis_embeddings={synopsis_embeddings is not None}"
+                )
             content_embed = self.content_encoder(genre_features, synopsis_embeddings)
         elif self.use_genre:
+            # Ensure genre_features is provided
+            if genre_features is None:
+                batch_size = user_ids.size(0)
+                device = user_ids.device
+                genre_features = torch.zeros(batch_size, self.num_genres, device=device)
             content_embed = self.genre_encoder(genre_features)
         elif self.use_synopsis:
+            # Ensure synopsis_embeddings is provided
+            if synopsis_embeddings is None:
+                batch_size = user_ids.size(0)
+                device = user_ids.device
+                synopsis_embeddings = torch.zeros(batch_size, self.synopsis_embed_dim, device=device)
             content_embed = self.synopsis_projection(synopsis_embeddings)
 
         # ===== Fusion =====
