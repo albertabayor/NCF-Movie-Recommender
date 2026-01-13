@@ -113,7 +113,10 @@ class BPRLoss(nn.Module):
 
     def forward(self, pos_scores, neg_scores):
         """
-        Compute BPR loss.
+        Compute BPR loss with numerical stability.
+
+        Uses the log-sum-exp trick: -log(sigmoid(x)) = log(1 + exp(-x))
+        This is more numerically stable than -log(sigmoid(x))
 
         Args:
             pos_scores: Scores for positive items, shape (batch, 1) or (batch,)
@@ -129,8 +132,14 @@ class BPRLoss(nn.Module):
             neg_scores = neg_scores.unsqueeze(-1)
 
         # BPR: -log(sigma(pos - neg))
+        # Numerically stable version: log(1 + exp(-(pos - neg)))
         diff = pos_scores - neg_scores  # (batch, num_neg)
-        loss = -torch.log(torch.sigmoid(diff) + 1e-10).mean()
+
+        # Clamp diff to prevent overflow in exp
+        diff = torch.clamp(diff, min=-50, max=50)
+
+        # Use softplus for numerical stability: softplus(-x) = log(1 + exp(-x))
+        loss = torch.nn.functional.softplus(-diff).mean()
 
         return loss
 
