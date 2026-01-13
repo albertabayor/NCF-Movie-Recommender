@@ -144,7 +144,7 @@ def train_epoch(
     max_grad_norm: float = 5.0,
     epoch: int = 0,
     scaler: torch.cuda.amp.GradScaler = None,
-    genre_features: Optional[np.ndarray] = None,
+    item_genre_features: Optional[np.ndarray] = None,
 ) -> float:
     """
     Train for one epoch.
@@ -158,7 +158,8 @@ def train_epoch(
         max_grad_norm: Max gradient norm for clipping
         epoch: Current epoch number (for progress bar)
         scaler: GradScaler for mixed precision training (optional)
-        genre_features: Full array of genre features for looking up negative item features
+        item_genre_features: Full item-to-genre mapping array of shape (num_items, genre_dim)
+                            for looking up genre features by item ID
 
     Returns:
         Average loss for the epoch
@@ -168,10 +169,11 @@ def train_epoch(
     num_batches = 0
 
     use_amp = scaler is not None
-    has_genre = genre_features is not None
+    has_genre = item_genre_features is not None
 
-    # Convert genre features to tensor if available
-    genre_tensor = torch.tensor(genre_features, dtype=torch.float32).to(device) if has_genre else None
+    # Convert item genre features to tensor if available
+    # This is indexed by item ID, not by sample position
+    genre_tensor = torch.tensor(item_genre_features, dtype=torch.float32).to(device) if has_genre else None
 
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch in pbar:
@@ -179,7 +181,7 @@ def train_epoch(
         pos_items = batch["pos_item"].to(device)
         neg_items = batch["neg_items"].to(device)  # (batch, num_neg)
 
-        # Get genre features for positive items
+        # Get genre features for positive items (from batch)
         pos_genre = batch.get("genre_features")
         if pos_genre is not None:
             pos_genre = pos_genre.to(device)
@@ -199,10 +201,10 @@ def train_epoch(
                 users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
                 neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
-                # Get genre features for negative items
+                # Get genre features for negative items (lookup by item ID)
                 neg_genre = None
                 if genre_tensor is not None:
-                    # Look up genre features for each negative item
+                    # Look up genre features for each negative item by their item ID
                     neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
 
                 neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
@@ -229,10 +231,10 @@ def train_epoch(
             users_expanded = users.unsqueeze(1).expand(-1, num_neg).reshape(batch_size * num_neg)
             neg_items_flat = neg_items.reshape(batch_size * num_neg)
 
-            # Get genre features for negative items
+            # Get genre features for negative items (lookup by item ID)
             neg_genre = None
             if genre_tensor is not None:
-                # Look up genre features for each negative item
+                # Look up genre features for each negative item by their item ID
                 neg_genre = genre_tensor[neg_items_flat]  # (batch * num_neg, genre_dim)
 
             neg_output = model(users_expanded, neg_items_flat, genre_features=neg_genre)
@@ -279,7 +281,7 @@ def train_model(
     lr_scheduler_factor: float = 0.5,
     gradient_clip_max_norm: float = 5.0,
     log_dir: str = None,
-    train_genre_features: Optional[np.ndarray] = None,
+    item_genre_features: Optional[np.ndarray] = None,
 ) -> Dict:
     """
     Train an NCF model with early stopping and learning rate scheduling.
@@ -305,7 +307,8 @@ def train_model(
         lr_scheduler_factor: Factor to reduce LR
         gradient_clip_max_norm: Max gradient norm for clipping
         log_dir: TensorBoard log directory
-        train_genre_features: Genre features for training items (for NeuMF+)
+        item_genre_features: Item-to-genre mapping array of shape (num_items, genre_dim)
+                            Used for looking up negative item features during training
 
     Returns:
         Dict with training history
@@ -325,6 +328,14 @@ def train_model(
     from .negative_sampling import build_user_history
     user_history = build_user_history(train_users, train_items)
 
+    # Create per-sample genre features for training data
+    # This gives genre features for each positive item in the training set
+    train_sample_genre_features = None
+    if item_genre_features is not None:
+        # Index item_genre_features by train_items to get per-sample features
+        train_sample_genre_features = item_genre_features[train_items]
+        print(f"  Per-sample genre features shape: {train_sample_genre_features.shape}")
+
     # Create dataset and dataloader
     dataset = NCFDataset(
         users=train_users,
@@ -332,7 +343,7 @@ def train_model(
         num_negatives=num_negatives,
         num_items=num_items,
         user_history=user_history,
-        genre_features=train_genre_features,
+        genre_features=train_sample_genre_features,
     )
     dataloader = DataLoader(
         dataset,
@@ -391,7 +402,7 @@ def train_model(
             max_grad_norm=gradient_clip_max_norm,
             epoch=epoch,
             scaler=scaler,
-            genre_features=train_genre_features,
+            item_genre_features=item_genre_features,
         )
 
         history["train_loss"].append(train_loss)

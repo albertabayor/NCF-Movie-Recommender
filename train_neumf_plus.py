@@ -86,20 +86,33 @@ def main():
     val_users = val_df["userId"].values
     val_items = val_df["movieId"].values
 
-    # Extract genre features
-    print("\n[3/6] Extracting genre features...")
-    train_genre_features = np.stack(train_df["genre_features"].values)
-    val_genre_features = np.stack(val_df["genre_features"].values)
+    # Build item-to-genre mapping (before sampling for complete coverage)
+    print("\n[3/6] Building item-to-genre mapping...")
+    # Load full training data to get all unique items
+    full_train_df = pd.read_pickle(config.paths.train_path)
+    unique_items = full_train_df["movieId"].unique()
+    item_genre_features = np.zeros((num_items, num_genres), dtype=np.float32)
 
-    print(f"  Train genre shape: {train_genre_features.shape}")
+    # For each unique item, get its genre features
+    for item_id in unique_items:
+        item_rows = full_train_df[full_train_df["movieId"] == item_id]
+        if len(item_rows) > 0:
+            item_genre_features[item_id] = item_rows["genre_features"].iloc[0]
+
+    print(f"  Item-to-genre mapping shape: {item_genre_features.shape}")
+    print(f"  Non-zero items: {np.any(item_genre_features > 0, axis=1).sum()} / {num_items}")
+
+    # Extract validation genre features (per-sample for evaluation)
+    print("\n[4/6] Extracting validation genre features...")
+    val_genre_features = np.stack(val_df["genre_features"].values)
     print(f"  Val genre shape: {val_genre_features.shape}")
 
     # Build user history for negative sampling
-    print("\n[4/6] Building user history for negative sampling...")
+    print("\n[5/6] Building user history for negative sampling...")
     user_history = build_user_history(train_users, train_items)
 
     # Create NeuMF+ model
-    print("\n[5/6] Creating NeuMF+ model...")
+    print("\n[6/6] Creating NeuMF+ model...")
     model = NeuMFPlus(
         num_users=num_users,
         num_items=num_items,
@@ -190,7 +203,7 @@ def main():
         lr_scheduler_patience=3,
         lr_scheduler_factor=0.5,
         log_dir=str(config.paths.TENSORBOARD_LOG_DIR),
-        train_genre_features=train_genre_features,  # Pass genre features for training
+        item_genre_features=item_genre_features,  # Pass item-to-genre mapping for negative sampling
     )
 
     print("\n" + "=" * 70)
