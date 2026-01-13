@@ -183,7 +183,8 @@ class NeuMFPlus(nn.Module):
                     hidden_dim=gated_fusion_hidden_dim,
                     dropout=gated_fusion_dropout,
                 )
-                self.final_input_dim = self.cf_output_dim  # Gated fusion preserves CF dim
+                # Gated fusion outputs the max of cf_dim and content_dim
+                self.final_input_dim = max(self.cf_output_dim, actual_content_dim)
             else:
                 # Simple concatenation
                 self.final_input_dim = self.cf_output_dim + actual_content_dim
