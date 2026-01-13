@@ -175,8 +175,18 @@ def train_epoch(
     # This is indexed by item ID, not by sample position
     genre_tensor = torch.tensor(item_genre_features, dtype=torch.float32).to(device) if has_genre else None
 
+    # Debug: Print first batch keys
+    debug_once = True
     pbar = tqdm(dataloader, desc=f"Epoch {epoch}")
     for batch in pbar:
+        if debug_once and has_genre:
+            print(f"DEBUG: Batch keys: {list(batch.keys())}")
+            print(f"DEBUG: genre_features in batch: {'genre_features' in batch}")
+            if 'genre_features' in batch:
+                print(f"DEBUG: genre_features type: {type(batch['genre_features'])}")
+                print(f"DEBUG: genre_features shape: {batch['genre_features'].shape if hasattr(batch['genre_features'], 'shape') else 'N/A'}")
+            debug_once = False
+
         users = batch["user"].to(device)
         pos_items = batch["pos_item"].to(device)
         neg_items = batch["neg_items"].to(device)  # (batch, num_neg)
