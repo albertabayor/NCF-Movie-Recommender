@@ -398,9 +398,9 @@ class NeuMFPlus(nn.Module):
             device: Device to load model on
 
         Returns:
-            Loaded model
+            Loaded model and checkpoint dict
         """
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         config = checkpoint['model_config']
 
         model = cls(
@@ -411,7 +411,9 @@ class NeuMFPlus(nn.Module):
             use_synopsis=config['use_synopsis'],
             use_gated_fusion=config['use_gated_fusion'],
         )
-        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # Load state_dict with strict=False to handle version mismatches
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model = model.to(device)
 
         return model, checkpoint
